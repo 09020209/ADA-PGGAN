@@ -36,7 +36,7 @@ parser.add_argument("--model_type", default="pggan_celebahq",help="The model to 
 parser.add_argument("--learning_rate", default=0.02, help="Learning rate for SGD.", type=int)
 parser.add_argument("--vgg_layer", default=16, help="The VGG network layer number to extract features from.", type=int)
 parser.add_argument("--use_latent_finder", default=True, help="Whether or not to use a latent finder to find the starting latents to optimize from.", type=bool)
-parser.add_argument("--image_to_latent_path", default="image_to_latent_styleada.pt", help="The path to the .pt (Pytorch) latent finder model.", type=str)
+parser.add_argument("--image_to_latent_path", default="image_to_latent_ada.pt", help="The path to the .pt (Pytorch) latent finder model.", type=str)
 
 args, other = parser.parse_known_args()
 
