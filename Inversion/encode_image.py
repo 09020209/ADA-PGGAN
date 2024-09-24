@@ -35,8 +35,8 @@ parser.add_argument("--model_type", default="pggan_celebahq",help="The model to 
 
 parser.add_argument("--learning_rate", default=0.02, help="Learning rate for SGD.", type=int)
 parser.add_argument("--vgg_layer", default=16, help="The VGG network layer number to extract features from.", type=int)
-parser.add_argument("--use_latent_finder", default=False, help="Whether or not to use a latent finder to find the starting latents to optimize from.", type=bool)
-parser.add_argument("--image_to_latent_path", default="image_to_latent.pt", help="The path to the .pt (Pytorch) latent finder model.", type=str)
+parser.add_argument("--use_latent_finder", default=True, help="Whether or not to use a latent finder to find the starting latents to optimize from.", type=bool)
+parser.add_argument("--image_to_latent_path", default="image_to_latent_styleada.pt", help="The path to the .pt (Pytorch) latent finder model.", type=str)
 
 args, other = parser.parse_known_args()
 
@@ -111,7 +111,7 @@ def optimize_latents():
 #         print('reference_image+++++++++++++++++++++++++++++++++==',reference_image)
 #        
         latents_to_be_optimized = image_to_latent(reference_image)
-        print('latents_to_be_optimized',latents_to_be_optimized)
+        print('latents_to_be_optimized.shape',latents_to_be_optimized.shape)
         latents_to_be_optimized = latents_to_be_optimized.detach().cuda().requires_grad_(True)
     else:
         # 设置随机种子以便复现结果，可以移除这行以生成不同的随机数
@@ -119,7 +119,7 @@ def optimize_latents():
 
         # 生成一个 (1, 1024) 的标准正态分布张量
 #         latents_to_be_optimized =torch.randint(0, 256, (1, 1024), dtype=torch.int).cuda().requires_grad_(True)
-        latents_to_be_optimized = torch.randint(0, 256, (1, 1024)).float().cuda()
+        latents_to_be_optimized = torch.randint(0, 256, (1, 512)).float().cuda()
 
 # 启用梯度计算，用于优化
         latents_to_be_optimized.requires_grad_(True)
