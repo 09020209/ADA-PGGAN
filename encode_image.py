@@ -1,194 +1,166 @@
-import argparse
-from tqdm import tqdm
-import numpy as np
-import torch
-# from InterFaceGAN.models.stylegan_generator import StyleGANGenerator
-from interfacegan.models.pggan_generator import PGGANGenerator
-from models.latent_optimizer import LatentOptimizer
-from models.image_to_latent import ImageToLatent
-from models.losses import LatentLoss
-from utilities.hooks import GeneratedImageHook
-from utilities.images import load_images, images_to_video, save_image
-from utilities.files import validate_path
-from interfacegan.models.model_settings import MODEL_POOL
 
-import click
+
+
+import numpy as np
 import dnnlib
-import numpy as np
-import PIL.Image
-import torch
-
 import legacy
-    # 首先，检测是否支持CUDA，并据此设置设备
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-parser = argparse.ArgumentParser(description="Find the latent space representation of an input image.")
-parser.add_argument("image_path", help="Filepath of the image to be encoded.")
-parser.add_argument("dlatent_path", help="Filepath to save the dlatent (WP) at.")
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torchvision.utils import make_grid, save_image
+import matplotlib.pyplot as plt
+import numpy as np
+class UnFlatten(nn.Module):
+    def forward(self, input, size=1024):
+        return input.view(input.size(0), size, 1, 1)
 
-parser.add_argument("--save_optimized_image", default=False, help="Whether or not to save the image created with the optimized latents.", type=bool)
-parser.add_argument("--optimized_image_path", default="optimized.png", help="The path to save the image created with the optimized latents.", type=str)
-parser.add_argument("--video", default=False, help="Whether or not to save a video of the encoding process.", type=bool)
-parser.add_argument("--video_path", default="video.avi", help="Where to save the video at.", type=str)
-parser.add_argument("--save_frequency", default=10, help="How often to save the images to video. Smaller = Faster.", type=int)
-parser.add_argument("--iterations", default=1000, help="Number of optimizations steps.", type=int)
-parser.add_argument("--model_type", default="pggan_celebahq",help="The model to use from interfacegan repo.", type=str)
+class Generator(nn.Module):
+    def __init__(self, channels_noise, channels_img, features_g):
+        super(Generator, self).__init__()
+        self.net = nn.Sequential(
+            # Input: N x channels_noise x 1 x 1
+            UnFlatten(),
+            self._block(channels_noise, features_g * 16, 4, 1, 0),  # img: 4x4
+            self._block(features_g * 16, features_g * 8, 4, 2, 1),  # img: 8x8
+            self._block(features_g * 8, features_g * 4, 4, 2, 1),  # img: 16x16
+            self._block(features_g * 4, features_g * 2, 4, 2, 1),  # img: 32x32
+            self._block(features_g * 2, features_g * 2, 4, 2, 1),  # img: 32x32
+            # self._block(features_g * 2, features_g * 2, 4, 2, 1),  # img: 32x32
 
-parser.add_argument("--learning_rate", default=0.02, help="Learning rate for SGD.", type=int)
-parser.add_argument("--vgg_layer", default=16, help="The VGG network layer number to extract features from.", type=int)
-parser.add_argument("--use_latent_finder", default=False, help="Whether or not to use a latent finder to find the starting latents to optimize from.", type=bool)
-parser.add_argument("--image_to_latent_path", default="image_to_latent.pt", help="The path to the .pt (Pytorch) latent finder model.", type=str)
+            nn.ConvTranspose2d(
+                features_g * 2, channels_img, kernel_size=4, stride=2, padding=1
+            ),
+            # Output: N x channels_img x 64 x 64
+            nn.Tanh(),
+        )
 
-args, other = parser.parse_known_args()
+    def _block(self, in_channels, out_channels, kernel_size, stride, padding):
+        return nn.Sequential(
+            nn.ConvTranspose2d(
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                padding,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels),
+                        nn.ReLU(),
+        )
 
-def normalized_to_normal_image(image):
-    mean=torch.tensor([0.485, 0.456, 0.406]).view(-1,1,1).float()
-    std=torch.tensor([0.229, 0.224, 0.225]).view(-1,1,1).float()
+    def forward(self, x):
+        return self.net(x)
     
-    image = image.detach().cpu()
     
-    image *= std
-    image += mean
-    image *= 255
-    
-    image = image.numpy()[0]
-    image = np.transpose(image, (1,2,0))
-    return image.astype(np.uint8)
-
-
-#  """Main function."""
-#   args = parse_args()
-#   logger = setup_logger(args.output_dir, logger_name='generate_data')
-
-#   logger.info(f'Initializing generator.')
-#   gan_type = MODEL_POOL[args.model_name]['gan_type']
-#   if gan_type == 'pggan':
-#     model = PGGANGenerator(args.model_name, logger)
-#     kwargs = {}
-
-# device = torch.device('cuda')
+LEARNING_RATE = 1e-4
+# BATCH_SIZE = 40
+IMAGE_SIZE = 128
+CHANNELS_IMG = 1
+Z_DIM = 1024
+NUM_EPOCHS = 10
+FEATURES_CRITIC = 16
+FEATURES_GEN = 32
+CRITIC_ITERATIONS = 5
+LAMBDA_GP = 10
+# load model
+# latent_dim = 1024
+# generator = Generator(latent_dim)
+# generator = Generator(Z_DIM, CHANNELS_IMG, FEATURES_GEN)
+# generator.load_state_dict(torch.load('./generator_model.pth'))  # Assuming the model is saved in PyTorch format
 # with dnnlib.util.open_url('./network-snapshot-000600.pkl', 'rb') as f:
-#         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
-# c = None    
+# #     generator = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+#     generator = legacy.load_network_pkl(f)['G_ema'] # type: ignore
+# c = None       
+# def generate_random_latent_vectors(num_vectors, latent_dim):
+#     return np.random.randn(num_vectors, latent_dim)
+device = torch.device('cuda')
+with dnnlib.util.open_url('./network-snapshot-000600.pkl', 'rb') as f:
+        generator = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+c = None   
+# c = c.to(device)
+
+def generate_random_latent_vectors(latent_dim, num_vectors):
+    return torch.randn(num_vectors, latent_dim)
+
+# def interpolate_vectors(vec1, vec2, num_interpolations):
+#     ratios = np.linspace(0, 1, num_interpolations)[:, np.newaxis]
+#     return ratios * vec1 + (1 - ratios) * vec2
 
 
-def optimize_latents():
-    print("Optimizing Latents.")
-
-#     synthesizer = PGGANGenerator(args.model_type)
-    device = torch.device('cuda')
-    with dnnlib.util.open_url('./network-snapshot-000600.pkl', 'rb') as f:
-        G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
-    c = None    
-#     c = c.to(device)
-    latent_optimizer = LatentOptimizer(G, args.vgg_layer)
-    # Optimize only the dlatents.
-    for param in latent_optimizer.parameters():
-        param.requires_grad_(False)
-    
-    if args.video or args.save_optimized_image:
-        # Hook, saves an image during optimization to be used to create video.
-        generated_image_hook = GeneratedImageHook(latent_optimizer.post_synthesis_processing, args.save_frequency)
-
-    reference_image = load_images([args.image_path])
-    print('reference_image+++++++++++++++++++++++++++++++++==',reference_image)
-    reference_image = torch.from_numpy(reference_image).cuda()
-    print('reference_image+++++++++++++++++++++++++++++++++==',reference_image)
-#     print('reference_image',reference_image)
-    reference_image = latent_optimizer.vgg_processing(reference_image)
-    print('reference_image+++++++++++++++++++++++++++++++++==',reference_image)
-#     print('reference_image_pro',reference_image)
-    reference_features = latent_optimizer.vgg16(reference_image).detach()
-    reference_image = reference_image.detach()
-    print('reference_image+++++++++++++++++++++++++++++++++==',reference_image)
-    if args.use_latent_finder:
-        image_to_latent = ImageToLatent().cuda()
-        image_to_latent.load_state_dict(torch.load(args.image_to_latent_path))
-        image_to_latent.eval()
-
-        print('reference_image+++++++++++++++++++++++++++++++++==',reference_image)
-        
-#         reference_image = normalized_to_normal_image(reference_image)
-#         print('reference_image+++++++++++++++++++++++++++++++++==',reference_image)
-#        
-        latents_to_be_optimized = image_to_latent(reference_image)
-        print('latents_to_be_optimized',latents_to_be_optimized)
-        latents_to_be_optimized = latents_to_be_optimized.detach().cuda().requires_grad_(True)
-    else:
-        # 设置随机种子以便复现结果，可以移除这行以生成不同的随机数
-        torch.manual_seed(0)
-
-        # 生成一个 (1, 1024) 的标准正态分布张量
-#         latents_to_be_optimized =torch.randint(0, 256, (1, 1024), dtype=torch.int).cuda().requires_grad_(True)
-        latents_to_be_optimized = torch.randint(0, 256, (1, 1024)).float().cuda()
-
-# 启用梯度计算，用于优化
-        latents_to_be_optimized.requires_grad_(True)
-        print('latents_to_be_optimized.requires_grad',latents_to_be_optimized.requires_grad)
-# 打印结果
-        print('latents_to_be_optimized',latents_to_be_optimized)
-#         latents_to_be_optimized = torch.zeros((1,1024)).cuda().requires_grad_(True)
-
-    criterion = LatentLoss()
-    optimizer = torch.optim.SGD([latents_to_be_optimized], lr=args.learning_rate)
-
-    progress_bar = tqdm(range(args.iterations))
-    for step in progress_bar:
-        optimizer.zero_grad()
-#         print('latents_to_be_optimized',latents_to_be_optimized.shape)
-        generated_image_features = latent_optimizer(latents_to_be_optimized).requires_grad_(True)
-#         generated_image_features= generated_image_features.requires_grad_(True)
-#         print('generated_image_features',generated_image_features)
-#         print('reference_features',reference_features)
-                                  
-        print('reference_features.requires_grad',reference_features.requires_grad)
-#         print('generated_image_features',generated_image_features.requires_grad)                                   print('generated_image_features.requires_grad',generated_image_features.requires_grad)
-        loss = criterion(generated_image_features, reference_features)
-#         # 2. 使用损失张量传递给 torch.autograd.grad()，而不是虚拟的标量张量
-#         grad_tensors = torch.autograd.grad(loss, latents_to_be_optimized, create_graph=True, retain_graph=True)
-
-# 3. 在打印梯度时使用 .item() 方法将损失转换为标量值
-#         for grad_tensor in grad_tensors:
-#             print('grad=======', grad_tensor.item())
-        loss.backward()
-        loss = loss.item()
-
-        optimizer.step()
-        progress_bar.set_description("Step: {}, Loss: {}".format(step, loss))
-    
-#     optimized_dlatents = latents_to_be_optimized.detach().cuda().numpy()
-    optimized_dlatents = latents_to_be_optimized.detach().cpu().numpy()
-    print('optimized_dlatents',optimized_dlatents)
-    
-    np.save(args.dlatent_path, optimized_dlatents)
-#     optimized_dlatents = torch.from_numpy(optimized_dlatents).to(device)
-#     if c is not None:
-#         c = c.to(device)
-
-#     generated_image = G(optimized_dlatents,c)
-         
-#     save_image(generated_image, f"./to/FANYAN.png")
-#     print('保存完成')
-
-    if args.video:
-        images_to_video(generated_image_hook.get_images(), args.video_path)
-    if args.save_optimized_image:
-        save_image(generated_image_hook.last_image, args.optimized_image_path)
-
-def main():
-    assert(validate_path(args.image_path, "r"))
-    assert(validate_path(args.dlatent_path, "w"))
-    assert(1 <= args.vgg_layer <= 16)
-    if args.video: assert(validate_path(args.video_path, "w"))
-    if args.save_optimized_image: assert(validate_path(args.optimized_image_path, "w"))
-    if args.use_latent_finder: assert(validate_path(args.image_to_latent_path, "r"))
-    
-    optimize_latents()
-
-if __name__ == "__main__":
-    main()
+# spherical linear interpolation (slerp)
+def slerp(val, low, high):
+    omega = torch.acos(torch.clamp(torch.dot(low / torch.norm(low), high / torch.norm(high)), -1, 1))
+    so = torch.sin(omega)
+    if so == 0:
+        # L'Hopital's rule/LERP
+        return (1.0 - val) * low + val * high
+    return torch.sin((1.0 - val) * omega) / so * low + torch.sin(val * omega) / so * high
 
 
-    
-    
+# uniform interpolation between two points in latent space
+def interpolate_points(p1, p2, n_steps=12):
+    ratios = torch.linspace(0, 1, steps=n_steps)
+    vectors = []
+    for ratio in ratios:
+        v = slerp(ratio, p1, p2)
+        vectors.append(v)
+    return torch.stack(vectors)
 
 
+
+
+# 定义潜在向量的维度和插值数量
+latent_dim = 512
+num_vectors = 10
+num_interpolations = 12
+
+# 生成随机潜在向量
+random_latent_vectors = generate_random_latent_vectors(latent_dim,num_vectors)
+print('random_latent_vectors',random_latent_vectors.shape)
+
+i=1
+for latent_vector in random_latent_vectors:
+#     prinr('j',j)
+    print('latent_vector ',latent_vector.shape)
+    latent_vector = latent_vector.to('cuda')
+
+    latent_vector = torch.tensor(latent_vector,dtype=torch.float32)
+#     print('latent_vector ',latent_vector.shape)
+    latent_vector = latent_vector.view(1, 512)
+    # 将潜在向量输入到生成器中生成图像
+    generated_image = generator(latent_vector,c,noise_mode='const')
+    generated_images = generated_image.view(-1, 1, 1024, 1024)
+    save_image(generated_images, f"./result2/rock_{i}.png",  normalize=True)
+    i+=1
+
+
+
+# 对随机潜在向量进行插值
+interpolated_vectors = []
+
+# 保存最初生成的十个潜在向量
+interpolated_vectors.append(random_latent_vectors[0])
+print('random_latent_vectors[0]',random_latent_vectors[0].shape)
+
+for i in range(num_vectors - 1):
+    interpolated_vectors.extend(interpolate_points(random_latent_vectors[i], random_latent_vectors[i + 1]))
+    # 在每个插值之后保存下一个原始潜在向量
+    interpolated_vectors.append(random_latent_vectors[i + 1])
+
+# interpolated_vectors = np.array(interpolated_vectors)
+# print('interpolated_vectors', interpolated_vectors.shape)
+j=1
+for latent_vector in interpolated_vectors:
+#     prinr('j',j)
+    print('latent_vector ',latent_vector.shape)
+    latent_vector = latent_vector.to('cuda')
+
+    latent_vector = torch.tensor(latent_vector,dtype=torch.float32)
+    print('latent_vector ',latent_vector.shape)
+    latent_vector = latent_vector.view(1, 512)
+    # 将潜在向量输入到生成器中生成图像
+    generated_image = generator(latent_vector,c,noise_mode='const')
+    generated_images = generated_image.view(-1, 1, 1024, 1024)
+    save_image(generated_images, f"./result1/rock_{j}.png",  normalize=True)
+    j+=1
