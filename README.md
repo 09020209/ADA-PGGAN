@@ -6,3 +6,30 @@ python datasets.py celebaHQ $PATH_TO_CELEBAHQ -o $OUTPUT_DATASET - f
 
 ADA-PGGAN generates training for the model, running train.py in generate: 
 python train.py PGAN -c config_celebaHQ.json --restart -n celebaHQ --np_vis
+
+
+This project requires:
+pytorch
+torchvision
+numpy
+scipy
+h5py (fashionGen)
+For our data sets and pre-trained models, download them here:https: //drive.google.com/drive/folders/1ZvqJMX_jq-wynKw7iV_whJBcAo2bXRuu?usp=drive_link
+
+1. ADA-PGGAN
+We first trained a generation model of ADA-PGGAN, the data set is 500 binary slices of 1024×1024 size, saved to the folder 1024_slice_500, training command:
+python train.py PGAN -c config_celebaHQ.json --restart -n celebaHQ --np_vis
+The pre-trained ADA-PGGAN model is saved as network-snapshot-000600.pkl and can be called directly.
+
+2.RVION
+(1) Use ADA-PGGAN model to generate 50K data set and save its corresponding input noise as a label, and store it in folder gen_train50k as a training set of Resnet50.
+(2) The training command line of Resnet50 model :python train.py, and the pre-trained model is saved as image_to_latent_ada.pt.
+(3) Inversion of the specified image using encode_image.py, command line:
+python encode_image.py
+aligned_image.jpg
+dlatents.npy
+--use_latent_finder true # Activates model.
+--image_to_latent_path ./image_to_latent_ada.pt # Specifies path to model.
+
+3.Interpolation
+Interpolate the potential vector obtained by RVION:python interpolation.py
